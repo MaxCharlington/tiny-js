@@ -30,8 +30,8 @@
  * This is a simple program showing how to use TinyJS
  */
 
-#include "TinyJS.h"
-#include "TinyJS_Functions.h"
+#include "TinyJS.hpp"
+#include "TinyJS_Functions.hpp"
 #include <assert.h>
 #include <stdio.h>
 
@@ -41,17 +41,17 @@
 //const char *code = "{ var b = 1; for (var i=0;i<4;i=i+1) b = b * 2; }";
 const char *code = "function myfunc(x, y) { return x + y; } var a = myfunc(1,2); print(a);";
 
-void js_print(CScriptVar *v, void *userdata) {
+void js_print(CScriptVar *v, void *) {
     printf("> %s\n", v->getParameter("text")->getString().c_str());
 }
 
-void js_dump(CScriptVar *v, void *userdata) {
+void js_dump(CScriptVar *, void *userdata) {
     CTinyJS *js = (CTinyJS*)userdata;
     js->root->trace(">  ");
 }
 
 
-int main(int argc, char **argv)
+int main()
 {
   CTinyJS *js = new CTinyJS();
   /* add the functions from TinyJS_Functions.cpp */
@@ -83,5 +83,4 @@ int main(int argc, char **argv)
   _CrtDumpMemoryLeaks();
 #endif
 #endif
-  return 0;
 }

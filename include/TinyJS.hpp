@@ -25,102 +25,379 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  */
+#ifndef TINYJS_HPP
+#define TINYJS_HPP
 
-/* Version 0.1  :  (gw) First published on Google Code
-   Version 0.11 :  Making sure the 'root' variable never changes
-                   'symbol_base' added for the current base of the sybmbol table
-   Version 0.12 :  Added findChildOrCreate, changed string passing to use references
-                   Fixed broken string encoding in getJSString()
-                   Removed getInitCode and added getJSON instead
-                   Added nil
-                   Added rough JSON parsing
-                   Improved example app
-   Version 0.13 :  Added tokenEnd/tokenLastEnd to lexer to avoid parsing whitespace
-                   Ability to define functions without names
-                   Can now do "var mine = function(a,b) { ... };"
-                   Slightly better 'trace' function
-                   Added findChildOrCreateByPath function
-                   Added simple test suite
-                   Added skipping of blocks when not executing
-   Version 0.14 :  Added parsing of more number types
-                   Added parsing of string defined with '
-                   Changed nil to null as per spec, added 'undefined'
-                   Now set variables with the correct scope, and treat unknown
-                              as 'undefined' rather than failing
-                   Added proper (I hope) handling of null and undefined
-                   Added === check
-   Version 0.15 :  Fix for possible memory leaks
-   Version 0.16 :  Removal of un-needed findRecursive calls
-                   symbol_base removed and replaced with 'scopes' stack
-                   Added reference counting a proper tree structure
-                       (Allowing pass by reference)
-                   Allowed JSON output to output IDs, not strings
-                   Added get/set for array indices
-                   Changed Callbacks to include user data pointer
-                   Added some support for objects
-                   Added more Java-esque builtin functions
-   Version 0.17 :  Now we don't deepCopy the parent object of the class
-                   Added JSON.stringify and eval()
-                   Nicer JSON indenting
-                   Fixed function output in JSON
-                   Added evaluateComplex
-                   Fixed some reentrancy issues with evaluate/execute
-   Version 0.18 :  Fixed some issues with code being executed when it shouldn't
-   Version 0.19 :  Added array.length
-                   Changed '__parent' to 'prototype' to bring it more in line with javascript
-   Version 0.20 :  Added '%' operator
-   Version 0.21 :  Added array type
-                   String.length() no more - now String.length
-                   Added extra constructors to reduce confusion
-                   Fixed checks against undefined
-   Version 0.22 :  First part of ardi's changes:
-                       sprintf -> sprintf_s
-                       extra tokens parsed
-                       array memory leak fixed
-                   Fixed memory leak in evaluateComplex
-                   Fixed memory leak in FOR loops
-                   Fixed memory leak for unary minus
-   Version 0.23 :  Allowed evaluate[Complex] to take in semi-colon separated
-                     statements and then only return the value from the last one.
-                     Also checks to make sure *everything* was parsed.
-                   Ints + doubles are now stored in binary form (faster + more precise)
-   Version 0.24 :  More useful error for maths ops
-                   Don't dump everything on a match error.
-   Version 0.25 :  Better string escaping
-   Version 0.26 :  Add CScriptVar::equals
-                   Add built-in array functions
-   Version 0.27 :  Added OZLB's TinyJS.setVariable (with some tweaks)
-                   Added OZLB's Maths Functions
-   Version 0.28 :  Ternary operator
-                   Rudimentary call stack on error
-                   Added String Character functions
-                   Added shift operators
-   Version 0.29 :  Added new object via functions
-                   Fixed getString() for double on some platforms
-   Version 0.30 :  Rlyeh Mario's patch for Math Functions on VC++
-   Version 0.31 :  Add exec() to TinyJS functions
-                   Now print quoted JSON that can be read by PHP/Python parsers
-                   Fixed postfix increment operator
-   Version 0.32 :  Fixed Math.randInt on 32 bit PCs, where it was broken
-   Version 0.33 :  Fixed Memory leak + brokenness on === comparison
+// If defined, this keeps a note of all calls and where from in memory. This is slower, but good for debugging
+#define TINYJS_CALL_STACK
 
-    NOTE:
-          Constructing an array with an initial length 'Array(5)' doesn't work
-          Recursive loops of data such as a.foo = a; fail to be garbage collected
-          length variable cannot be set
-          The postfix increment operator returns the current value, not the previous as it should.
-          There is no prefix increment operator
-          Arrays are implemented as a linked list - hence a lookup time is O(n)
+#ifdef _WIN32
+#ifdef _DEBUG
+#define _CRTDBG_MAP_ALLOC
+#include <stdlib.h>
+#include <crtdbg.h>
+#endif
+#endif
+#include <string>
+#include <vector>
+#include <cassert>
 
-    TODO:
-          Utility va-args style function in TinyJS for executing a function directly
-          Merge the parsing of expressions/statements so eval("statement") works like we'd expect.
-          Move 'shift' implementation into mathsOp
+#ifndef TRACE
+#define TRACE printf
+#endif // TRACE
 
- */
 
-#include "TinyJS.h"
-#include <assert.h>
+const int TINYJS_LOOP_MAX_ITERATIONS = 8192;
+
+// STDLIB
+constexpr int stoi(const std::string& str)
+{
+    int ret = 0;
+
+    if (str.length() == 0) return ret;
+
+    bool negative = str[0] == '-';
+    auto start_it = negative ? str.begin() + 1 : str.begin();
+
+    for (auto num = start_it; num != str.end(); num++)
+    {
+        ret *= 10;
+        ret += *num - '0';
+    }
+
+    if (negative) ret *= -1;
+
+    return ret;
+}
+
+constexpr long stol(const std::string& str)
+{
+    long ret = 0;
+
+    if (str.length() == 0) return ret;
+
+    bool negative = str[0] == '-';
+    auto start_it = negative ? str.begin() + 1 : str.begin();
+
+    for (auto num = start_it; num != str.end(); num++)
+    {
+        ret *= 10;
+        ret += *num - '0';
+    }
+
+    if (negative) ret *= -1;
+
+    return ret;
+}
+
+
+enum LEX_TYPES {
+    LEX_EOF = 0,
+    LEX_ID = 256,
+    LEX_INT,
+    LEX_FLOAT,
+    LEX_STR,
+
+    LEX_EQUAL,
+    LEX_TYPEEQUAL,
+    LEX_NEQUAL,
+    LEX_NTYPEEQUAL,
+    LEX_LEQUAL,
+    LEX_LSHIFT,
+    LEX_LSHIFTEQUAL,
+    LEX_GEQUAL,
+    LEX_RSHIFT,
+    LEX_RSHIFTUNSIGNED,
+    LEX_RSHIFTEQUAL,
+    LEX_PLUSEQUAL,
+    LEX_MINUSEQUAL,
+    LEX_PLUSPLUS,
+    LEX_MINUSMINUS,
+    LEX_ANDEQUAL,
+    LEX_ANDAND,
+    LEX_OREQUAL,
+    LEX_OROR,
+    LEX_XOREQUAL,
+    // reserved words
+#define LEX_R_LIST_START LEX_R_IF
+    LEX_R_IF,
+    LEX_R_ELSE,
+    LEX_R_DO,
+    LEX_R_WHILE,
+    LEX_R_FOR,
+    LEX_R_BREAK,
+    LEX_R_CONTINUE,
+    LEX_R_FUNCTION,
+    LEX_R_RETURN,
+    LEX_R_VAR,
+    LEX_R_TRUE,
+    LEX_R_FALSE,
+    LEX_R_NULL,
+    LEX_R_UNDEFINED,
+    LEX_R_NEW,
+
+	LEX_R_LIST_END /* always the last entry */
+};
+
+enum SCRIPTVAR_FLAGS {
+    SCRIPTVAR_UNDEFINED   = 0,
+    SCRIPTVAR_FUNCTION    = 1,
+    SCRIPTVAR_OBJECT      = 2,
+    SCRIPTVAR_ARRAY       = 4,
+    SCRIPTVAR_DOUBLE      = 8,  // floating point double
+    SCRIPTVAR_INTEGER     = 16, // integer number
+    SCRIPTVAR_STRING      = 32, // string
+    SCRIPTVAR_NULL        = 64, // it seems null is its own data type
+
+    SCRIPTVAR_NATIVE      = 128, // to specify this is a native function
+    SCRIPTVAR_NUMERICMASK = SCRIPTVAR_NULL |
+                            SCRIPTVAR_DOUBLE |
+                            SCRIPTVAR_INTEGER,
+    SCRIPTVAR_VARTYPEMASK = SCRIPTVAR_DOUBLE |
+                            SCRIPTVAR_INTEGER |
+                            SCRIPTVAR_STRING |
+                            SCRIPTVAR_FUNCTION |
+                            SCRIPTVAR_OBJECT |
+                            SCRIPTVAR_ARRAY |
+                            SCRIPTVAR_NULL,
+
+};
+
+#define TINYJS_RETURN_VAR "return"
+#define TINYJS_PROTOTYPE_CLASS "prototype"
+#define TINYJS_TEMP_NAME ""
+#define TINYJS_BLANK_DATA ""
+
+/// convert the given string into a quoted string suitable for javascript
+constexpr std::string getJSString(const std::string &str);
+
+class CScriptException {
+public:
+    std::string text;
+    constexpr CScriptException(const std::string &exceptionText);
+};
+
+class CScriptLex
+{
+public:
+    constexpr CScriptLex(const std::string &input);
+    constexpr CScriptLex(CScriptLex *owner, int startChar, int endChar);
+
+    char currCh{};
+    char nextCh{};
+    int tk; ///< The type of the token that we have
+    int tokenStart; ///< Position in the data at the beginning of the token we have here
+    int tokenEnd; ///< Position in the data at the last character of the token we have here
+    int tokenLastEnd; ///< Position in the data at the last character of the last token
+    std::string tkStr; ///< Data contained in the token we have here
+
+    constexpr void match(int expected_tk); ///< Lexical match wotsit
+    constexpr static std::string getTokenStr(int token); ///< Get the string representation of the given token
+    constexpr void reset(); ///< Reset this lex so we can start again
+
+    constexpr std::string getSubString(int pos); ///< Return a sub-string from the given position up until right now
+    constexpr CScriptLex *getSubLex(int lastPosition); ///< Return a sub-lexer from the given position up until right now
+
+    constexpr std::string getPosition(int pos=-1); ///< Return a string representing the position in lines and columns of the character pos given
+
+protected:
+    /* When we go into a loop, we use getSubLex to get a lexer for just the sub-part of the
+       relevant string. This doesn't re-allocate and copy the string, but instead copies
+       the data pointer and sets dataOwned to false, and dataStart/dataEnd to the relevant things. */
+    std::string data; ///< Data string to get tokens from
+    std::size_t dataStart, dataEnd; ///< Start and end position in data string
+    bool dataOwned; ///< Do we own this data string?
+
+    std::size_t dataPos; ///< Position in data (we CAN go past the end of the string here)
+
+    constexpr void getNextCh();
+    constexpr void getNextToken(); ///< Get the text token from our text string
+};
+
+class CScriptVar;
+
+using JSCallback = void (*)(CScriptVar *var, void *userdata);
+
+class CScriptVarLink
+{
+public:
+  std::string name;
+  CScriptVarLink *nextSibling;
+  CScriptVarLink *prevSibling;
+  CScriptVar *var;
+  bool owned;
+
+  constexpr CScriptVarLink(CScriptVar *var, const std::string &name = TINYJS_TEMP_NAME);
+  constexpr CScriptVarLink(const CScriptVarLink &link); ///< Copy constructor
+  constexpr ~CScriptVarLink();
+  constexpr void replaceWith(CScriptVar *newVar); ///< Replace the Variable pointed to
+  constexpr void replaceWith(CScriptVarLink *newVar); ///< Replace the Variable pointed to (just dereferences)
+  constexpr int getIntName(); ///< Get the name as an integer (for arrays)
+  constexpr void setIntName(int n); ///< Set the name as an integer (for arrays)
+};
+
+/// Variable class (containing a doubly-linked list of children)
+class CScriptVar
+{
+public:
+    constexpr CScriptVar(); ///< Create undefined
+    constexpr CScriptVar(const std::string &varData, int varFlags); ///< User defined
+    constexpr CScriptVar(const std::string &str); ///< Create a string
+    constexpr CScriptVar(double varData);
+    constexpr CScriptVar(int val);
+    constexpr ~CScriptVar();
+
+    constexpr CScriptVar *getReturnVar(); ///< If this is a function, get the result value (for use by native functions)
+    constexpr void setReturnVar(CScriptVar *var); ///< Set the result value. Use this when setting complex return data as it avoids a deepCopy()
+    constexpr CScriptVar *getParameter(const std::string &name); ///< If this is a function, get the parameter with the given name (for use by native functions)
+
+    constexpr CScriptVarLink *findChild(const std::string &childName); ///< Tries to find a child with the given name, may return 0
+    constexpr CScriptVarLink *findChildOrCreate(const std::string &childName, int varFlags=SCRIPTVAR_UNDEFINED); ///< Tries to find a child with the given name, or will create it with the given flags
+    constexpr CScriptVarLink *findChildOrCreateByPath(const std::string &path); ///< Tries to find a child with the given path (separated by dots)
+    constexpr CScriptVarLink *addChild(const std::string &childName, CScriptVar *child=NULL);
+    constexpr CScriptVarLink *addChildNoDup(const std::string &childName, CScriptVar *child=NULL); ///< add a child overwriting any with the same name
+    constexpr void removeChild(CScriptVar *child);
+    constexpr void removeLink(CScriptVarLink *link); ///< Remove a specific link (this is faster than finding via a child)
+    constexpr void removeAllChildren();
+    constexpr CScriptVar *getArrayIndex(int idx); ///< The the value at an array index
+    constexpr void setArrayIndex(int idx, CScriptVar *value); ///< Set the value at an array index
+    constexpr int getArrayLength(); ///< If this is an array, return the number of items in it (else 0)
+    constexpr int getChildren(); ///< Get the number of children
+
+    constexpr int getInt();
+    constexpr bool getBool() { return getInt() != 0; }
+    constexpr double getDouble();
+    constexpr const std::string &getString();
+    constexpr std::string getParsableString(); ///< get Data as a parsable javascript string
+    constexpr void setInt(int num);
+    constexpr void setDouble(double val);
+    constexpr void setString(const std::string &str);
+    constexpr void setUndefined();
+    constexpr void setArray();
+    constexpr bool equals(CScriptVar *v);
+
+    constexpr bool isInt() { return (flags&SCRIPTVAR_INTEGER)!=0; }
+    constexpr bool isDouble() { return (flags&SCRIPTVAR_DOUBLE)!=0; }
+    constexpr bool isString() { return (flags&SCRIPTVAR_STRING)!=0; }
+    constexpr bool isNumeric() { return (flags&SCRIPTVAR_NUMERICMASK)!=0; }
+    constexpr bool isFunction() { return (flags&SCRIPTVAR_FUNCTION)!=0; }
+    constexpr bool isObject() { return (flags&SCRIPTVAR_OBJECT)!=0; }
+    constexpr bool isArray() { return (flags&SCRIPTVAR_ARRAY)!=0; }
+    constexpr bool isNative() { return (flags&SCRIPTVAR_NATIVE)!=0; }
+    constexpr bool isUndefined() { return (flags & SCRIPTVAR_VARTYPEMASK) == SCRIPTVAR_UNDEFINED; }
+    constexpr bool isNull() { return (flags & SCRIPTVAR_NULL)!=0; }
+    constexpr bool isBasic() { return firstChild==0; } ///< Is this *not* an array/object/etc
+
+    constexpr CScriptVar *mathsOp(CScriptVar *b, int op); ///< do a maths op with another script variable
+    constexpr void copyValue(CScriptVar *val); ///< copy the value from the value given
+    constexpr CScriptVar *deepCopy(); ///< deep copy this node and return the result
+
+    constexpr void trace(std::string indentStr = "", const std::string &name = ""); ///< Dump out the contents of this using trace
+    constexpr std::string getFlagsAsString(); ///< For debugging - just dump a string version of the flags
+    constexpr  std::string getJSON(const std::string linePrefix=""); ///< Write out all the JS code needed to recreate this script variable to the stream (as JSON)
+    constexpr void setCallback(JSCallback callback, void *userdata); ///< Set the callback for native functions
+
+    CScriptVarLink *firstChild;
+    CScriptVarLink *lastChild;
+
+    /// For memory management/garbage collection
+    constexpr CScriptVar *ref(); ///< Add reference to this variable
+    constexpr void unref(); ///< Remove a reference, and delete this variable if required
+    constexpr int getRefs(); ///< Get the number of references to this script variable
+protected:
+    int refs; ///< The number of references held to this - used for garbage collection
+
+    std::string data; ///< The contents of this variable if it is a string
+    long intData; ///< The contents of this variable if it is an int
+    double doubleData; ///< The contents of this variable if it is a double
+    int flags; ///< the flags determine the type of the variable - int/double/string/etc
+    JSCallback jsCallback; ///< Callback for native functions
+    void *jsCallbackUserData; ///< user data passed as second argument to native functions
+
+    constexpr void init(); ///< initialisation of data members
+
+    /** Copy the basic data and flags from the variable given, with no
+      * children. Should be used internally only - by copyValue and deepCopy */
+    constexpr void copySimpleData(CScriptVar *val);
+
+    friend class CTinyJS;
+};
+
+class CTinyJS {
+public:
+    constexpr CTinyJS();
+    constexpr ~CTinyJS();
+
+    constexpr void execute(const std::string &code);
+    /** Evaluate the given code and return a link to a javascript object,
+     * useful for (dangerous) JSON parsing. If nothing to return, will return
+     * 'undefined' variable type. CScriptVarLink is returned as this will
+     * automatically unref the result as it goes out of scope. If you want to
+     * keep it, you must use ref() and unref() */
+    constexpr CScriptVarLink evaluateComplex(const std::string &code);
+    /** Evaluate the given code and return a string. If nothing to return, will return
+     * 'undefined' */
+    constexpr std::string evaluate(const std::string &code);
+
+    /// add a native function to be called from TinyJS
+    /** example:
+       \code
+           void scRandInt(CScriptVar *c, void *userdata) { ... }
+           tinyJS->addNative("function randInt(min, max)", scRandInt, 0);
+       \endcode
+
+       or
+
+       \code
+           void scSubstring(CScriptVar *c, void *userdata) { ... }
+           tinyJS->addNative("function String.substring(lo, hi)", scSubstring, 0);
+       \endcode
+    */
+    constexpr void addNative(const std::string &funcDesc, JSCallback ptr, void *userdata);
+
+    /// Get the given variable specified by a path (var1.var2.etc), or return 0
+    constexpr CScriptVar *getScriptVariable(const std::string &path);
+    /// Get the value of the given variable, or return 0
+    constexpr const std::string *getVariable(const std::string &path);
+    /// set the value of the given variable, return trur if it exists and gets set
+    constexpr bool setVariable(const std::string &path, const std::string &varData);
+
+    /// Send all variables to stdout
+    constexpr void trace();
+
+    CScriptVar *root{nullptr};   /// root of symbol table
+private:
+    CScriptLex *l{nullptr};             /// current lexer
+    std::vector<CScriptVar*> scopes; /// stack of scopes when parsing
+#ifdef TINYJS_CALL_STACK
+    std::vector<std::string> call_stack; /// Names of places called so we can show when erroring
+#endif
+
+    CScriptVar *stringClass{nullptr}; /// Built in string class
+    CScriptVar *objectClass{nullptr}; /// Built in object class
+    CScriptVar *arrayClass{nullptr}; /// Built in array class
+
+    // parsing - in order of precedence
+    constexpr CScriptVarLink *functionCall(bool &execute, CScriptVarLink *function, CScriptVar *parent);
+    constexpr CScriptVarLink *factor(bool &execute);
+    constexpr CScriptVarLink *unary(bool &execute);
+    constexpr CScriptVarLink *term(bool &execute);
+    constexpr CScriptVarLink *expression(bool &execute);
+    constexpr CScriptVarLink *shift(bool &execute);
+    constexpr CScriptVarLink *condition(bool &execute);
+    constexpr CScriptVarLink *logic(bool &execute);
+    constexpr CScriptVarLink *ternary(bool &execute);
+    constexpr CScriptVarLink *base(bool &execute);
+    constexpr void block(bool &execute);
+    constexpr void statement(bool &execute);
+    // parsing utility functions
+    constexpr CScriptVarLink *parseFunctionDefinition();
+    constexpr void parseFunctionArguments(CScriptVar *funcVar);
+
+    constexpr CScriptVarLink *findInScopes(const std::string &childName); ///< Finds a child, looking recursively up the scopes
+    /// Look up in any parent classes of the given object
+    constexpr CScriptVarLink *findInParentClasses(CScriptVar *object, const std::string &name);
+};
 
 #define ASSERT(X) assert(X)
 /* Frees the given link IF it isn't owned by anything else */
@@ -202,28 +479,31 @@ void show_allocated() {
 #endif
 
 // ----------------------------------------------------------------------------------- Utils
-bool isWhitespace(char ch) {
+constexpr bool isWhitespace(char ch) {
     return (ch==' ') || (ch=='\t') || (ch=='\n') || (ch=='\r');
 }
 
-bool isNumeric(char ch) {
+constexpr bool isNumeric(char ch) {
     return (ch>='0') && (ch<='9');
 }
-bool isNumber(const string &str) {
+
+constexpr bool isNumber(const string &str) {
     for (size_t i=0;i<str.size();i++)
       if (!isNumeric(str[i])) return false;
     return true;
 }
-bool isHexadecimal(char ch) {
+
+constexpr bool isHexadecimal(char ch) {
     return ((ch>='0') && (ch<='9')) ||
            ((ch>='a') && (ch<='f')) ||
            ((ch>='A') && (ch<='F'));
 }
-bool isAlpha(char ch) {
+
+constexpr bool isAlpha(char ch) {
     return ((ch>='a') && (ch<='z')) || ((ch>='A') && (ch<='Z')) || ch=='_';
 }
 
-bool isIDString(const char *s) {
+constexpr bool isIDString(const char *s) {
     if (!isAlpha(*s))
         return false;
     while (*s) {
@@ -234,8 +514,8 @@ bool isIDString(const char *s) {
     return true;
 }
 
-void replace(string &str, char textFrom, const char *textTo) {
-    int sLen = strlen(textTo);
+constexpr void replace(string &str, char textFrom, const char *textTo) {
+    size_t sLen = strlen(textTo);
     size_t p = str.find(textFrom);
     while (p != string::npos) {
         str = str.substr(0, p) + textTo + str.substr(p+1);
@@ -244,7 +524,7 @@ void replace(string &str, char textFrom, const char *textTo) {
 }
 
 /// convert the given string into a quoted string suitable for javascript
-std::string getJSString(const std::string &str) {
+constexpr std::string getJSString(const std::string &str) {
     std::string nStr = str;
     for (size_t i=0;i<nStr.size();i++) {
       const char *replaceWith = "";
@@ -275,7 +555,7 @@ std::string getJSString(const std::string &str) {
 }
 
 /** Is the string alphanumeric */
-bool isAlphaNum(const std::string &str) {
+constexpr bool isAlphaNum(const std::string &str) {
     if (str.size()==0) return true;
     if (!isAlpha(str[0])) return false;
     for (size_t i=0;i<str.size();i++)
@@ -286,35 +566,27 @@ bool isAlphaNum(const std::string &str) {
 
 // ----------------------------------------------------------------------------------- CSCRIPTEXCEPTION
 
-CScriptException::CScriptException(const string &exceptionText) {
+constexpr CScriptException::CScriptException(const string &exceptionText) {
     text = exceptionText;
 }
 
 // ----------------------------------------------------------------------------------- CSCRIPTLEX
 
-CScriptLex::CScriptLex(const string &input) {
-    data = _strdup(input.c_str());
-    dataOwned = true;
+constexpr CScriptLex::CScriptLex(const string &input) {
+    data = input;
     dataStart = 0;
-    dataEnd = strlen(data);
+    dataEnd = data.length();
     reset();
 }
 
-CScriptLex::CScriptLex(CScriptLex *owner, int startChar, int endChar) {
+constexpr CScriptLex::CScriptLex(CScriptLex *owner, int startChar, int endChar) {
     data = owner->data;
-    dataOwned = false;
     dataStart = startChar;
     dataEnd = endChar;
     reset();
 }
 
-CScriptLex::~CScriptLex(void)
-{
-    if (dataOwned)
-        free((void*)data);
-}
-
-void CScriptLex::reset() {
+constexpr void CScriptLex::reset() {
     dataPos = dataStart;
     tokenStart = 0;
     tokenEnd = 0;
@@ -326,7 +598,7 @@ void CScriptLex::reset() {
     getNextToken();
 }
 
-void CScriptLex::match(int expected_tk) {
+constexpr void CScriptLex::match(int expected_tk) {
     if (tk!=expected_tk) {
         ostringstream errorString;
         errorString << "Got " << getTokenStr(tk) << " expected " << getTokenStr(expected_tk)
@@ -336,7 +608,7 @@ void CScriptLex::match(int expected_tk) {
     getNextToken();
 }
 
-string CScriptLex::getTokenStr(int token) {
+constexpr string CScriptLex::getTokenStr(int token) {
     if (token>32 && token<128) {
         char buf[4] = "' '";
         buf[1] = (char)token;
@@ -391,7 +663,7 @@ string CScriptLex::getTokenStr(int token) {
     return msg.str();
 }
 
-void CScriptLex::getNextCh() {
+constexpr void CScriptLex::getNextCh() {
     currCh = nextCh;
     if (dataPos < dataEnd)
         nextCh = data[dataPos];
@@ -400,7 +672,7 @@ void CScriptLex::getNextCh() {
     dataPos++;
 }
 
-void CScriptLex::getNextToken() {
+constexpr void CScriptLex::getNextToken() {
     tk = LEX_EOF;
     tkStr.clear();
     while (currCh && isWhitespace(currCh)) getNextCh();
@@ -603,23 +875,23 @@ void CScriptLex::getNextToken() {
     tokenEnd = dataPos-3;
 }
 
-string CScriptLex::getSubString(int lastPosition) {
+constexpr string CScriptLex::getSubString(int lastPosition) {
     int lastCharIdx = tokenLastEnd+1;
     if (lastCharIdx < dataEnd) {
         /* save a memory alloc by using our data array to create the
            substring */
         char old = data[lastCharIdx];
         data[lastCharIdx] = 0;
-        std::string value = &data[lastPosition];
+        string value = &data[lastPosition];
         data[lastCharIdx] = old;
         return value;
     } else {
-        return std::string(&data[lastPosition]);
+        return string(&data[lastPosition]);
     }
 }
 
 
-CScriptLex *CScriptLex::getSubLex(int lastPosition) {
+constexpr CScriptLex *CScriptLex::getSubLex(int lastPosition) {
     int lastCharIdx = tokenLastEnd+1;
     if (lastCharIdx < dataEnd)
         return new CScriptLex(this, lastPosition, lastCharIdx);
@@ -627,7 +899,7 @@ CScriptLex *CScriptLex::getSubLex(int lastPosition) {
         return new CScriptLex(this, lastPosition, dataEnd );
 }
 
-string CScriptLex::getPosition(int pos) {
+constexpr string CScriptLex::getPosition(int pos) {
     if (pos<0) pos=tokenLastEnd;
     int line = 1,col = 1;
     for (int i=0;i<pos;i++) {
@@ -642,14 +914,14 @@ string CScriptLex::getPosition(int pos) {
             col = 0;
         }
     }
-    char buf[256];
-    sprintf_s(buf, 256, "(line: %d, col: %d)", line, col);
-    return buf;
+	// std::string ret = "(line: " + std::to_string(line) + ", col: " + std::to_string(col) + ")";  // TODO:
+    // return ret;
+	return "(line: 0, col: 0)";
 }
 
 // ----------------------------------------------------------------------------------- CSCRIPTVARLINK
 
-CScriptVarLink::CScriptVarLink(CScriptVar *var, const std::string &name) {
+constexpr CScriptVarLink::CScriptVarLink(CScriptVar *var, const std::string &name) {
 #if DEBUG_MEMORY
     mark_allocated(this);
 #endif
@@ -660,7 +932,7 @@ CScriptVarLink::CScriptVarLink(CScriptVar *var, const std::string &name) {
     this->owned = false;
 }
 
-CScriptVarLink::CScriptVarLink(const CScriptVarLink &link) {
+constexpr CScriptVarLink::CScriptVarLink(const CScriptVarLink &link) {
     // Copy constructor
 #if DEBUG_MEMORY
     mark_allocated(this);
@@ -672,30 +944,31 @@ CScriptVarLink::CScriptVarLink(const CScriptVarLink &link) {
     this->owned = false;
 }
 
-CScriptVarLink::~CScriptVarLink() {
+constexpr CScriptVarLink::~CScriptVarLink() {
 #if DEBUG_MEMORY
     mark_deallocated(this);
 #endif
     var->unref();
 }
 
-void CScriptVarLink::replaceWith(CScriptVar *newVar) {
+constexpr void CScriptVarLink::replaceWith(CScriptVar *newVar) {
     CScriptVar *oldVar = var;
     var = newVar->ref();
     oldVar->unref();
 }
 
-void CScriptVarLink::replaceWith(CScriptVarLink *newVar) {
+constexpr void CScriptVarLink::replaceWith(CScriptVarLink *newVar) {
     if (newVar)
       replaceWith(newVar->var);
     else
       replaceWith(new CScriptVar());
 }
 
-int CScriptVarLink::getIntName() {
-    return atoi(name.c_str());
+constexpr int CScriptVarLink::getIntName() {
+    return ::stoi(name);
 }
-void CScriptVarLink::setIntName(int n) {
+
+constexpr void CScriptVarLink::setIntName(int n) {
     char sIdx[64];
     sprintf_s(sIdx, sizeof(sIdx), "%d", n);
     name = sIdx;
@@ -703,7 +976,7 @@ void CScriptVarLink::setIntName(int n) {
 
 // ----------------------------------------------------------------------------------- CSCRIPTVAR
 
-CScriptVar::CScriptVar() {
+constexpr CScriptVar::CScriptVar() {
     refs = 0;
 #if DEBUG_MEMORY
     mark_allocated(this);
@@ -712,7 +985,7 @@ CScriptVar::CScriptVar() {
     flags = SCRIPTVAR_UNDEFINED;
 }
 
-CScriptVar::CScriptVar(const string &str) {
+constexpr CScriptVar::CScriptVar(const string &str) {
     refs = 0;
 #if DEBUG_MEMORY
     mark_allocated(this);
@@ -723,7 +996,7 @@ CScriptVar::CScriptVar(const string &str) {
 }
 
 
-CScriptVar::CScriptVar(const string &varData, int varFlags) {
+constexpr CScriptVar::CScriptVar(const string &varData, int varFlags) {
     refs = 0;
 #if DEBUG_MEMORY
     mark_allocated(this);
@@ -731,14 +1004,14 @@ CScriptVar::CScriptVar(const string &varData, int varFlags) {
     init();
     flags = varFlags;
     if (varFlags & SCRIPTVAR_INTEGER) {
-      intData = strtol(varData.c_str(),0,0);
+      intData = ::stol(varData);
     } else if (varFlags & SCRIPTVAR_DOUBLE) {
-      doubleData = strtod(varData.c_str(),0);
+      doubleData = 0;  // TODO:
     } else
       data = varData;
 }
 
-CScriptVar::CScriptVar(double val) {
+constexpr CScriptVar::CScriptVar(double val) {
     refs = 0;
 #if DEBUG_MEMORY
     mark_allocated(this);
@@ -747,7 +1020,7 @@ CScriptVar::CScriptVar(double val) {
     setDouble(val);
 }
 
-CScriptVar::CScriptVar(int val) {
+constexpr CScriptVar::CScriptVar(int val) {
     refs = 0;
 #if DEBUG_MEMORY
     mark_allocated(this);
@@ -756,14 +1029,14 @@ CScriptVar::CScriptVar(int val) {
     setInt(val);
 }
 
-CScriptVar::~CScriptVar(void) {
+constexpr CScriptVar::~CScriptVar(void) {
 #if DEBUG_MEMORY
     mark_deallocated(this);
 #endif
     removeAllChildren();
 }
 
-void CScriptVar::init() {
+constexpr void CScriptVar::init() {
     firstChild = 0;
     lastChild = 0;
     flags = 0;
@@ -774,20 +1047,20 @@ void CScriptVar::init() {
     doubleData = 0;
 }
 
-CScriptVar *CScriptVar::getReturnVar() {
+constexpr CScriptVar *CScriptVar::getReturnVar() {
     return getParameter(TINYJS_RETURN_VAR);
 }
 
-void CScriptVar::setReturnVar(CScriptVar *var) {
+constexpr void CScriptVar::setReturnVar(CScriptVar *var) {
     findChildOrCreate(TINYJS_RETURN_VAR)->replaceWith(var);
 }
 
 
-CScriptVar *CScriptVar::getParameter(const std::string &name) {
+constexpr CScriptVar *CScriptVar::getParameter(const std::string &name) {
     return findChildOrCreate(name)->var;
 }
 
-CScriptVarLink *CScriptVar::findChild(const string &childName) {
+constexpr CScriptVarLink *CScriptVar::findChild(const string &childName) {
     CScriptVarLink *v = firstChild;
     while (v) {
         if (v->name.compare(childName)==0)
@@ -797,14 +1070,14 @@ CScriptVarLink *CScriptVar::findChild(const string &childName) {
     return 0;
 }
 
-CScriptVarLink *CScriptVar::findChildOrCreate(const string &childName, int varFlags) {
+constexpr CScriptVarLink *CScriptVar::findChildOrCreate(const string &childName, int varFlags) {
     CScriptVarLink *l = findChild(childName);
     if (l) return l;
 
     return addChild(childName, new CScriptVar(TINYJS_BLANK_DATA, varFlags));
 }
 
-CScriptVarLink *CScriptVar::findChildOrCreateByPath(const std::string &path) {
+constexpr CScriptVarLink *CScriptVar::findChildOrCreateByPath(const std::string &path) {
   size_t p = path.find('.');
   if (p == string::npos)
     return findChildOrCreate(path);
@@ -813,7 +1086,7 @@ CScriptVarLink *CScriptVar::findChildOrCreateByPath(const std::string &path) {
             findChildOrCreateByPath(path.substr(p+1));
 }
 
-CScriptVarLink *CScriptVar::addChild(const std::string &childName, CScriptVar *child) {
+constexpr CScriptVarLink *CScriptVar::addChild(const std::string &childName, CScriptVar *child) {
   if (isUndefined()) {
     flags = SCRIPTVAR_OBJECT;
   }
@@ -834,7 +1107,7 @@ CScriptVarLink *CScriptVar::addChild(const std::string &childName, CScriptVar *c
     return link;
 }
 
-CScriptVarLink *CScriptVar::addChildNoDup(const std::string &childName, CScriptVar *child) {
+constexpr CScriptVarLink *CScriptVar::addChildNoDup(const std::string &childName, CScriptVar *child) {
     // if no child supplied, create one
     if (!child)
       child = new CScriptVar();
@@ -849,7 +1122,7 @@ CScriptVarLink *CScriptVar::addChildNoDup(const std::string &childName, CScriptV
     return v;
 }
 
-void CScriptVar::removeChild(CScriptVar *child) {
+constexpr void CScriptVar::removeChild(CScriptVar *child) {
     CScriptVarLink *link = firstChild;
     while (link) {
         if (link->var == child)
@@ -860,7 +1133,7 @@ void CScriptVar::removeChild(CScriptVar *child) {
     removeLink(link);
 }
 
-void CScriptVar::removeLink(CScriptVarLink *link) {
+constexpr void CScriptVar::removeLink(CScriptVarLink *link) {
     if (!link) return;
     if (link->nextSibling)
       link->nextSibling->prevSibling = link->prevSibling;
@@ -873,7 +1146,7 @@ void CScriptVar::removeLink(CScriptVarLink *link) {
     delete link;
 }
 
-void CScriptVar::removeAllChildren() {
+constexpr void CScriptVar::removeAllChildren() {
     CScriptVarLink *c = firstChild;
     while (c) {
         CScriptVarLink *t = c->nextSibling;
@@ -884,7 +1157,7 @@ void CScriptVar::removeAllChildren() {
     lastChild = 0;
 }
 
-CScriptVar *CScriptVar::getArrayIndex(int idx) {
+constexpr CScriptVar *CScriptVar::getArrayIndex(int idx) {
     char sIdx[64];
     sprintf_s(sIdx, sizeof(sIdx), "%d", idx);
     CScriptVarLink *link = findChild(sIdx);
@@ -892,7 +1165,7 @@ CScriptVar *CScriptVar::getArrayIndex(int idx) {
     else return new CScriptVar(TINYJS_BLANK_DATA, SCRIPTVAR_NULL); // undefined
 }
 
-void CScriptVar::setArrayIndex(int idx, CScriptVar *value) {
+constexpr void CScriptVar::setArrayIndex(int idx, CScriptVar *value) {
     char sIdx[64];
     sprintf_s(sIdx, sizeof(sIdx), "%d", idx);
     CScriptVarLink *link = findChild(sIdx);
@@ -908,7 +1181,7 @@ void CScriptVar::setArrayIndex(int idx, CScriptVar *value) {
     }
 }
 
-int CScriptVar::getArrayLength() {
+constexpr int CScriptVar::getArrayLength() {
     int highest = -1;
     if (!isArray()) return 0;
 
@@ -923,7 +1196,7 @@ int CScriptVar::getArrayLength() {
     return highest+1;
 }
 
-int CScriptVar::getChildren() {
+constexpr int CScriptVar::getChildren() {
     int n = 0;
     CScriptVarLink *link = firstChild;
     while (link) {
@@ -933,7 +1206,7 @@ int CScriptVar::getChildren() {
     return n;
 }
 
-int CScriptVar::getInt() {
+constexpr int CScriptVar::getInt() {
     /* strtol understands about hex and octal */
     if (isInt()) return intData;
     if (isNull()) return 0;
@@ -942,7 +1215,7 @@ int CScriptVar::getInt() {
     return 0;
 }
 
-double CScriptVar::getDouble() {
+constexpr double CScriptVar::getDouble() {
     if (isDouble()) return doubleData;
     if (isInt()) return intData;
     if (isNull()) return 0;
@@ -950,44 +1223,40 @@ double CScriptVar::getDouble() {
     return 0; /* or NaN? */
 }
 
-const string &CScriptVar::getString() {
+constexpr const string &CScriptVar::getString() {
     /* Because we can't return a string that is generated on demand.
      * I should really just use char* :) */
-    static string s_null = "null";
-    static string s_undefined = "undefined";
     if (isInt()) {
       char buffer[32];
       sprintf_s(buffer, sizeof(buffer), "%ld", intData);
       data = buffer;
-      return data;
     }
     if (isDouble()) {
       char buffer[32];
       sprintf_s(buffer, sizeof(buffer), "%f", doubleData);
       data = buffer;
-      return data;
     }
-    if (isNull()) return s_null;
-    if (isUndefined()) return s_undefined;
+    if (isNull()) data = "null";
+    if (isUndefined()) data = "undefined";
     // are we just a string here?
     return data;
 }
 
-void CScriptVar::setInt(int val) {
+constexpr void CScriptVar::setInt(int val) {
     flags = (flags&~SCRIPTVAR_VARTYPEMASK) | SCRIPTVAR_INTEGER;
     intData = val;
     doubleData = 0;
     data = TINYJS_BLANK_DATA;
 }
 
-void CScriptVar::setDouble(double val) {
+constexpr void CScriptVar::setDouble(double val) {
     flags = (flags&~SCRIPTVAR_VARTYPEMASK) | SCRIPTVAR_DOUBLE;
     doubleData = val;
     intData = 0;
     data = TINYJS_BLANK_DATA;
 }
 
-void CScriptVar::setString(const string &str) {
+constexpr void CScriptVar::setString(const string &str) {
     // name sure it's not still a number or integer
     flags = (flags&~SCRIPTVAR_VARTYPEMASK) | SCRIPTVAR_STRING;
     data = str;
@@ -995,7 +1264,7 @@ void CScriptVar::setString(const string &str) {
     doubleData = 0;
 }
 
-void CScriptVar::setUndefined() {
+constexpr void CScriptVar::setUndefined() {
     // name sure it's not still a number or integer
     flags = (flags&~SCRIPTVAR_VARTYPEMASK) | SCRIPTVAR_UNDEFINED;
     data = TINYJS_BLANK_DATA;
@@ -1004,7 +1273,7 @@ void CScriptVar::setUndefined() {
     removeAllChildren();
 }
 
-void CScriptVar::setArray() {
+constexpr void CScriptVar::setArray() {
     // name sure it's not still a number or integer
     flags = (flags&~SCRIPTVAR_VARTYPEMASK) | SCRIPTVAR_ARRAY;
     data = TINYJS_BLANK_DATA;
@@ -1013,14 +1282,14 @@ void CScriptVar::setArray() {
     removeAllChildren();
 }
 
-bool CScriptVar::equals(CScriptVar *v) {
+constexpr bool CScriptVar::equals(CScriptVar *v) {
     CScriptVar *resV = mathsOp(v, LEX_EQUAL);
     bool res = resV->getBool();
     delete resV;
     return res;
 }
 
-CScriptVar *CScriptVar::mathsOp(CScriptVar *b, int op) {
+constexpr CScriptVar *CScriptVar::mathsOp(CScriptVar *b, int op) {
     CScriptVar *a = this;
     // Type equality check
     if (op == LEX_TYPEEQUAL || op == LEX_NTYPEEQUAL) {
@@ -1117,14 +1386,14 @@ CScriptVar *CScriptVar::mathsOp(CScriptVar *b, int op) {
     return 0;
 }
 
-void CScriptVar::copySimpleData(CScriptVar *val) {
+constexpr void CScriptVar::copySimpleData(CScriptVar *val) {
     data = val->data;
     intData = val->intData;
     doubleData = val->doubleData;
     flags = (flags & ~SCRIPTVAR_VARTYPEMASK) | (val->flags & SCRIPTVAR_VARTYPEMASK);
 }
 
-void CScriptVar::copyValue(CScriptVar *val) {
+constexpr void CScriptVar::copyValue(CScriptVar *val) {
     if (val) {
       copySimpleData(val);
       // remove all current children
@@ -1148,7 +1417,7 @@ void CScriptVar::copyValue(CScriptVar *val) {
     }
 }
 
-CScriptVar *CScriptVar::deepCopy() {
+constexpr CScriptVar *CScriptVar::deepCopy() {
     CScriptVar *newVar = new CScriptVar();
     newVar->copySimpleData(this);
     // copy children
@@ -1167,7 +1436,7 @@ CScriptVar *CScriptVar::deepCopy() {
     return newVar;
 }
 
-void CScriptVar::trace(string indentStr, const string &name) {
+constexpr void CScriptVar::trace(string indentStr, const string &name) {
     TRACE("%s'%s' = '%s' %s\n",
         indentStr.c_str(),
         name.c_str(),
@@ -1181,7 +1450,7 @@ void CScriptVar::trace(string indentStr, const string &name) {
     }
 }
 
-string CScriptVar::getFlagsAsString() {
+constexpr string CScriptVar::getFlagsAsString() {
   string flagstr = "";
   if (flags&SCRIPTVAR_FUNCTION) flagstr = flagstr + "FUNCTION ";
   if (flags&SCRIPTVAR_OBJECT) flagstr = flagstr + "OBJECT ";
@@ -1193,7 +1462,7 @@ string CScriptVar::getFlagsAsString() {
   return flagstr;
 }
 
-string CScriptVar::getParsableString() {
+constexpr string CScriptVar::getParsableString() {
   // Numbers can just be put in directly
   if (isNumeric())
     return getString();
@@ -1219,79 +1488,78 @@ string CScriptVar::getParsableString() {
   return "undefined";
 }
 
-void CScriptVar::getJSON(ostringstream &destination, const string linePrefix) {
+constexpr std::string CScriptVar::getJSON(const string linePrefix) {
+   std::string res;
    if (isObject()) {
       string indentedLinePrefix = linePrefix+"  ";
       // children - handle with bracketed list
-      destination << "{ \n";
+      res += "{ \n";
       CScriptVarLink *link = firstChild;
       while (link) {
-        destination << indentedLinePrefix;
-        destination  << getJSString(link->name);
-        destination  << " : ";
-        link->var->getJSON(destination, indentedLinePrefix);
+        res += indentedLinePrefix;
+        res += getJSString(link->name);
+        res += " : ";
+        res += link->var->getJSON(indentedLinePrefix);
         link = link->nextSibling;
         if (link) {
-          destination  << ",\n";
+          res += ",\n";
         }
       }
-      destination << "\n" << linePrefix << "}";
+      res += "\n" + linePrefix + "}";
     } else if (isArray()) {
       string indentedLinePrefix = linePrefix+"  ";
-      destination << "[\n";
+      res += "[\n";
       int len = getArrayLength();
       if (len>10000) len=10000; // we don't want to get stuck here!
 
       for (int i=0;i<len;i++) {
-        getArrayIndex(i)->getJSON(destination, indentedLinePrefix);
-        if (i<len-1) destination  << ",\n";
+        res += getArrayIndex(i)->getJSON(indentedLinePrefix);
+        if (i<len-1) res += ",\n";
       }
 
-      destination << "\n" << linePrefix << "]";
+      res += "\n" + linePrefix + "]";
     } else {
       // no children or a function... just write value directly
-      destination << getParsableString();
+      res += getParsableString();
     }
+	return res;
 }
 
 
-void CScriptVar::setCallback(JSCallback callback, void *userdata) {
+constexpr void CScriptVar::setCallback(JSCallback callback, void *userdata) {
     jsCallback = callback;
     jsCallbackUserData = userdata;
 }
 
-CScriptVar *CScriptVar::ref() {
+constexpr CScriptVar *CScriptVar::ref() {
     refs++;
     return this;
 }
 
-void CScriptVar::unref() {
+constexpr void CScriptVar::unref() {
     if (refs<=0) printf("OMFG, we have unreffed too far!\n");
     if ((--refs)==0) {
       delete this;
     }
 }
 
-int CScriptVar::getRefs() {
+constexpr int CScriptVar::getRefs() {
     return refs;
 }
-
-
 // ----------------------------------------------------------------------------------- CSCRIPT
 
-CTinyJS::CTinyJS() {
-    l = 0;
-    root = (new CScriptVar(TINYJS_BLANK_DATA, SCRIPTVAR_OBJECT))->ref();
-    // Add built-in classes
-    stringClass = (new CScriptVar(TINYJS_BLANK_DATA, SCRIPTVAR_OBJECT))->ref();
-    arrayClass = (new CScriptVar(TINYJS_BLANK_DATA, SCRIPTVAR_OBJECT))->ref();
-    objectClass = (new CScriptVar(TINYJS_BLANK_DATA, SCRIPTVAR_OBJECT))->ref();
+constexpr CTinyJS::CTinyJS()
+    : root{(new CScriptVar(TINYJS_BLANK_DATA, SCRIPTVAR_OBJECT))->ref()}
+    , stringClass{(new CScriptVar(TINYJS_BLANK_DATA, SCRIPTVAR_OBJECT))->ref()}
+    , objectClass{(new CScriptVar(TINYJS_BLANK_DATA, SCRIPTVAR_OBJECT))->ref()}
+    , arrayClass{(new CScriptVar(TINYJS_BLANK_DATA, SCRIPTVAR_OBJECT))->ref()}
+{
     root->addChild("String", stringClass);
     root->addChild("Array", arrayClass);
     root->addChild("Object", objectClass);
 }
 
-CTinyJS::~CTinyJS() {
+constexpr CTinyJS::~CTinyJS() {
     ASSERT(!l);
     scopes.clear();
     stringClass->unref();
@@ -1304,11 +1572,11 @@ CTinyJS::~CTinyJS() {
 #endif
 }
 
-void CTinyJS::trace() {
+constexpr void CTinyJS::trace() {
     root->trace();
 }
 
-void CTinyJS::execute(const string &code) {
+constexpr void CTinyJS::execute(const string &code) {
     CScriptLex *oldLex = l;
     vector<CScriptVar*> oldScopes = scopes;
     l = new CScriptLex(code);
@@ -1338,7 +1606,7 @@ void CTinyJS::execute(const string &code) {
     scopes = oldScopes;
 }
 
-CScriptVarLink CTinyJS::evaluateComplex(const string &code) {
+constexpr CScriptVarLink CTinyJS::evaluateComplex(const string &code) {
     CScriptLex *oldLex = l;
     vector<CScriptVar*> oldScopes = scopes;
 
@@ -1382,11 +1650,11 @@ CScriptVarLink CTinyJS::evaluateComplex(const string &code) {
     return CScriptVarLink(new CScriptVar());
 }
 
-string CTinyJS::evaluate(const string &code) {
+constexpr string CTinyJS::evaluate(const string &code) {
     return evaluateComplex(code).var->getString();
 }
 
-void CTinyJS::parseFunctionArguments(CScriptVar *funcVar) {
+constexpr void CTinyJS::parseFunctionArguments(CScriptVar *funcVar) {
   l->match('(');
   while (l->tk!=')') {
       funcVar->addChildNoDup(l->tkStr);
@@ -1396,7 +1664,7 @@ void CTinyJS::parseFunctionArguments(CScriptVar *funcVar) {
   l->match(')');
 }
 
-void CTinyJS::addNative(const string &funcDesc, JSCallback ptr, void *userdata) {
+constexpr void CTinyJS::addNative(const string &funcDesc, JSCallback ptr, void *userdata) {
     CScriptLex *oldLex = l;
     l = new CScriptLex(funcDesc);
 
@@ -1425,7 +1693,7 @@ void CTinyJS::addNative(const string &funcDesc, JSCallback ptr, void *userdata) 
     base->addChild(funcName, funcVar);
 }
 
-CScriptVarLink *CTinyJS::parseFunctionDefinition() {
+constexpr CScriptVarLink *CTinyJS::parseFunctionDefinition() {
   // actually parse a function...
   l->match(LEX_R_FUNCTION);
   string funcName = TINYJS_TEMP_NAME;
@@ -1447,7 +1715,7 @@ CScriptVarLink *CTinyJS::parseFunctionDefinition() {
  * on the start bracket). 'parent' is the object that contains this method,
  * if there was one (otherwise it's just a normnal function).
  */
-CScriptVarLink *CTinyJS::functionCall(bool &execute, CScriptVarLink *function, CScriptVar *parent) {
+constexpr CScriptVarLink *CTinyJS::functionCall(bool &execute, CScriptVarLink *function, CScriptVar *parent) {
   if (execute) {
     if (!function->var->isFunction()) {
         string errorMsg = "Expecting '";
@@ -1541,7 +1809,7 @@ CScriptVarLink *CTinyJS::functionCall(bool &execute, CScriptVarLink *function, C
   }
 }
 
-CScriptVarLink *CTinyJS::factor(bool &execute) {
+constexpr CScriptVarLink *CTinyJS::factor(bool &execute) {
     if (l->tk=='(') {
         l->match('(');
         CScriptVarLink *a = base(execute);
@@ -1712,7 +1980,7 @@ CScriptVarLink *CTinyJS::factor(bool &execute) {
     return 0;
 }
 
-CScriptVarLink *CTinyJS::unary(bool &execute) {
+constexpr CScriptVarLink *CTinyJS::unary(bool &execute) {
     CScriptVarLink *a;
     if (l->tk=='!') {
         l->match('!'); // binary not
@@ -1727,7 +1995,7 @@ CScriptVarLink *CTinyJS::unary(bool &execute) {
     return a;
 }
 
-CScriptVarLink *CTinyJS::term(bool &execute) {
+constexpr CScriptVarLink *CTinyJS::term(bool &execute) {
     CScriptVarLink *a = unary(execute);
     while (l->tk=='*' || l->tk=='/' || l->tk=='%') {
         int op = l->tk;
@@ -1742,7 +2010,7 @@ CScriptVarLink *CTinyJS::term(bool &execute) {
     return a;
 }
 
-CScriptVarLink *CTinyJS::expression(bool &execute) {
+constexpr CScriptVarLink *CTinyJS::expression(bool &execute) {
     bool negate = false;
     if (l->tk=='-') {
         l->match('-');
@@ -1782,7 +2050,7 @@ CScriptVarLink *CTinyJS::expression(bool &execute) {
     return a;
 }
 
-CScriptVarLink *CTinyJS::shift(bool &execute) {
+constexpr CScriptVarLink *CTinyJS::shift(bool &execute) {
   CScriptVarLink *a = expression(execute);
   if (l->tk==LEX_LSHIFT || l->tk==LEX_RSHIFT || l->tk==LEX_RSHIFTUNSIGNED) {
     int op = l->tk;
@@ -1799,7 +2067,7 @@ CScriptVarLink *CTinyJS::shift(bool &execute) {
   return a;
 }
 
-CScriptVarLink *CTinyJS::condition(bool &execute) {
+constexpr CScriptVarLink *CTinyJS::condition(bool &execute) {
     CScriptVarLink *a = shift(execute);
     CScriptVarLink *b;
     while (l->tk==LEX_EQUAL || l->tk==LEX_NEQUAL ||
@@ -1818,7 +2086,7 @@ CScriptVarLink *CTinyJS::condition(bool &execute) {
     return a;
 }
 
-CScriptVarLink *CTinyJS::logic(bool &execute) {
+constexpr CScriptVarLink *CTinyJS::logic(bool &execute) {
     CScriptVarLink *a = condition(execute);
     CScriptVarLink *b;
     while (l->tk=='&' || l->tk=='|' || l->tk=='^' || l->tk==LEX_ANDAND || l->tk==LEX_OROR) {
@@ -1855,7 +2123,7 @@ CScriptVarLink *CTinyJS::logic(bool &execute) {
     return a;
 }
 
-CScriptVarLink *CTinyJS::ternary(bool &execute) {
+constexpr CScriptVarLink *CTinyJS::ternary(bool &execute) {
   CScriptVarLink *lhs = logic(execute);
   bool noexec = false;
   if (l->tk=='?') {
@@ -1883,7 +2151,7 @@ CScriptVarLink *CTinyJS::ternary(bool &execute) {
   return lhs;
 }
 
-CScriptVarLink *CTinyJS::base(bool &execute) {
+constexpr CScriptVarLink *CTinyJS::base(bool &execute) {
     CScriptVarLink *lhs = ternary(execute);
     if (l->tk=='=' || l->tk==LEX_PLUSEQUAL || l->tk==LEX_MINUSEQUAL) {
         /* If we're assigning to this and we don't have a parent,
@@ -1916,7 +2184,7 @@ CScriptVarLink *CTinyJS::base(bool &execute) {
     return lhs;
 }
 
-void CTinyJS::block(bool &execute) {
+constexpr void CTinyJS::block(bool &execute) {
     l->match('{');
     if (execute) {
       while (l->tk && l->tk!='}')
@@ -1934,7 +2202,7 @@ void CTinyJS::block(bool &execute) {
 
 }
 
-void CTinyJS::statement(bool &execute) {
+constexpr void CTinyJS::statement(bool &execute) {
     if (l->tk==LEX_ID ||
         l->tk==LEX_INT ||
         l->tk==LEX_FLOAT ||
@@ -1978,7 +2246,7 @@ void CTinyJS::statement(bool &execute) {
           }
           if (l->tk != ';')
             l->match(',');
-        }       
+        }
         l->match(';');
     } else if (l->tk==LEX_R_IF) {
         l->match(LEX_R_IF);
@@ -2111,7 +2379,7 @@ void CTinyJS::statement(bool &execute) {
 }
 
 /// Get the given variable specified by a path (var1.var2.etc), or return 0
-CScriptVar *CTinyJS::getScriptVariable(const string &path) {
+constexpr CScriptVar *CTinyJS::getScriptVariable(const string &path) {
     // traverse path
     size_t prevIdx = 0;
     size_t thisIdx = path.find('.');
@@ -2129,7 +2397,7 @@ CScriptVar *CTinyJS::getScriptVariable(const string &path) {
 }
 
 /// Get the value of the given variable, or return 0
-const string *CTinyJS::getVariable(const string &path) {
+constexpr const string *CTinyJS::getVariable(const string &path) {
     CScriptVar *var = getScriptVariable(path);
     // return result
     if (var)
@@ -2139,7 +2407,7 @@ const string *CTinyJS::getVariable(const string &path) {
 }
 
 /// set the value of the given variable, return trur if it exists and gets set
-bool CTinyJS::setVariable(const std::string &path, const std::string &varData) {
+constexpr bool CTinyJS::setVariable(const std::string &path, const std::string &varData) {
     CScriptVar *var = getScriptVariable(path);
     // return result
     if (var) {
@@ -2150,13 +2418,13 @@ bool CTinyJS::setVariable(const std::string &path, const std::string &varData) {
         else
             var->setString(varData.c_str());
         return true;
-    }    
+    }
     else
         return false;
 }
 
 /// Finds a child, looking recursively up the scopes
-CScriptVarLink *CTinyJS::findInScopes(const std::string &childName) {
+constexpr CScriptVarLink *CTinyJS::findInScopes(const std::string &childName) {
     for (int s=scopes.size()-1;s>=0;s--) {
       CScriptVarLink *v = scopes[s]->findChild(childName);
       if (v) return v;
@@ -2166,7 +2434,7 @@ CScriptVarLink *CTinyJS::findInScopes(const std::string &childName) {
 }
 
 /// Look up in any parent classes of the given object
-CScriptVarLink *CTinyJS::findInParentClasses(CScriptVar *object, const std::string &name) {
+constexpr CScriptVarLink *CTinyJS::findInParentClasses(CScriptVar *object, const std::string &name) {
     // Look for links to actual parent classes
     CScriptVarLink *parentClass = object->findChild(TINYJS_PROTOTYPE_CLASS);
     while (parentClass) {
@@ -2188,3 +2456,5 @@ CScriptVarLink *CTinyJS::findInParentClasses(CScriptVar *object, const std::stri
 
     return 0;
 }
+
+#endif  // TINYJS_HPP

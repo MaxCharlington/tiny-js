@@ -30,9 +30,9 @@
  * This is a program to run all the tests in the tests folder...
  */
 
-#include "TinyJS.h"
-#include "TinyJS_Functions.h"
-#include "TinyJS_MathFunctions.h"
+#include "TinyJS.hpp"
+#include "TinyJS_Functions.hpp"
+#include "TinyJS_MathFunctions.hpp"
 #include <assert.h>
 #include <sys/stat.h>
 #include <string>
@@ -229,9 +229,7 @@ bool run_test(const char *filename) {
     sprintf(fn, "%s.fail.js", filename);
     FILE *f = fopen(fn, "wt");
     if (f) {
-      std::ostringstream symbols;
-      s.root->getJSON(symbols);
-      fprintf(f, "%s", symbols.str().c_str());
+      fprintf(f, "%s", s.root->getJSON().c_str());
       fclose(f);
     }
 
